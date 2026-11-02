@@ -40,7 +40,11 @@
       s_all: '전체', s_main: '본회의', s_ws: '워크숍', s_tag_only: '🎓 오럴·스포트라이트만',
       s_results: '{n}건', s_top_inst: '이 결과에 가장 많은 기관', s_more: '더 보기', s_examples: '예시',
       s_match: '유사도', s_results_sem: '의미가 가장 가까운 {n}편', s_none: '결과가 없습니다', s_clear_inst: '기관 필터 해제', s_sem_fail: '의미 검색 모델을 불러오지 못해 키워드 검색으로 전환했습니다.',
-      tz_local: '현지', now_btn: '⏱ 지금 시각으로', tag_all: '전체'
+      tz_local: '현지', now_btn: '⏱ 지금 시각으로', tag_all: '전체',
+      view_week: '🗓 타임테이블', wk_title: '⭐ 위시리스트 타임테이블',
+      wk_desc: '핀한 일정과 논문을 요일별로 한눈에 봅니다. 일정 탭에서 카드나 논문을 길게 눌러 추가하세요.',
+      wk_empty: '아직 이 개최지에 핀한 일정이 없습니다', wk_untimed: '시간 미정', wk_go: '📅 일정에서 고르기',
+      wk_papers: '논문 {n}편', wk_dows: ['일', '월', '화', '수', '목', '금', '토']
     },
     en: {
       search_ph: 'Search events & papers (title, author, session…)',
@@ -74,7 +78,11 @@
       s_all: 'All', s_main: 'Main track', s_ws: 'Workshops', s_tag_only: '🎓 Orals & spotlights only',
       s_results: '{n} results', s_top_inst: 'Most frequent institutions in these results', s_more: 'Show more', s_examples: 'Try',
       s_match: 'match', s_results_sem: '{n} closest papers by meaning', s_none: 'No results', s_clear_inst: 'Clear institution filter', s_sem_fail: 'Could not load the semantic model — switched to keyword search.',
-      tz_local: 'Local', now_btn: '⏱ Jump to now', tag_all: 'All'
+      tz_local: 'Local', now_btn: '⏱ Jump to now', tag_all: 'All',
+      view_week: '🗓 Timetable', wk_title: '⭐ Wishlist timetable',
+      wk_desc: 'Your pinned events and papers, laid out by day. Long-press any card or paper in Schedule to add it.',
+      wk_empty: 'Nothing pinned at this venue yet', wk_untimed: 'No time set', wk_go: '📅 Pick from Schedule',
+      wk_papers: '{n} papers', wk_dows: ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat']
     }
   };
 
@@ -170,7 +178,7 @@
     lang: params.get('lang') || localStorage.getItem('nips_lang') || 'en',
     loc: params.get('loc') || localStorage.getItem('nips_loc') || 'sydney',
     day: null,
-    view: params.get('view') === 'search' ? 'search' : (localStorage.getItem('nips_view') === 'search' && !params.get('day') && !params.get('open') ? 'search' : 'schedule'),
+    view: /^(search|week)$/.test(params.get('view')) ? params.get('view') : (/^(search|week)$/.test(localStorage.getItem('nips_view')) && !params.get('day') && !params.get('open') ? localStorage.getItem('nips_view') : 'schedule'),
     tz: params.get('tz') || localStorage.getItem('nips_tz') || 'local',
     chip: 'all',
     q: '',
@@ -330,6 +338,14 @@
       app.appendChild(renderFooter());
       return;
     }
+    if (state.view === 'week') {
+      app.appendChild(renderLocTabs(true));
+      var wm = h('main', { class: 'timeline week-view', id: 'timeline' });
+      app.appendChild(wm);
+      renderWeek(wm);
+      app.appendChild(renderFooter());
+      return;
+    }
     app.appendChild(renderLocTabs());
     app.appendChild(renderDayTabs());
     app.appendChild(renderToolbar());
@@ -389,17 +405,20 @@
   function renderViewNav() {
     return h('div', { class: 'viewnav-wrap' }, [h('nav', { class: 'viewnav' }, [
       h('button', { class: state.view === 'schedule' ? 'on' : '', onclick: function () { if (state.view !== 'schedule') setView('schedule'); } }, [t('view_schedule')]),
+      h('button', { class: state.view === 'week' ? 'on' : '', onclick: function () { if (state.view !== 'week') setView('week'); } }, [t('view_week')]),
       h('button', { class: state.view === 'search' ? 'on' : '', onclick: function () { if (state.view !== 'search') setView('search'); } }, [t('view_search')])
     ])]);
   }
 
-  function renderLocTabs() {
+  function renderLocTabs(withWishCount) {
+    var counts = withWishCount ? wishByLoc() : null;
     return h('div', { class: 'loctabs-wrap' }, [
       h('nav', { class: 'loctabs' }, (SCHED.locs || []).map(function (l) {
+        var n = counts ? (counts[l.id] || 0) : 0;
         return h('button', {
           class: 'loctab' + (state.loc === l.id ? ' on' : ''),
           onclick: function () { if (state.loc !== l.id) setLoc(l.id); }
-        }, [h('b', null, [loc(l.name)]), h('span', null, [loc(l.role) + ' · ' + loc(l.range)])]);
+        }, [h('b', null, [loc(l.name), n ? h('em', { class: 'loc-wn' }, ['⭐ ' + n]) : null]), h('span', null, [loc(l.role) + ' · ' + loc(l.range)])]);
       }))
     ]);
   }
@@ -617,6 +636,148 @@
         h('div', { class: 'tlabel' }, [fmtT(k, day.loc)]), cards
       ]));
     });
+  }
+
+
+  // ---------------- wishlist timetable (week grid) ----------------
+  // pinned events + sessions of pinned papers -> [{ev, day, papers:[]}]
+  function wishItems() {
+    var items = {}, out = [];
+    Object.keys(wish.events).forEach(function (id) {
+      var hit = EV_INDEX[id];
+      if (hit && !items[id]) { items[id] = { ev: hit.ev, day: hit.day, papers: [] }; out.push(items[id]); }
+    });
+    Object.keys(wish.papers).forEach(function (pid) {
+      var w = wish.papers[pid], hit = w.s && EV_INDEX[w.s];
+      if (!hit) return;
+      if (!items[w.s]) { items[w.s] = { ev: hit.ev, day: hit.day, papers: [], viaPaper: true }; out.push(items[w.s]); }
+      items[w.s].papers.push(Object.assign({ id: pid }, w));
+    });
+    return out;
+  }
+  function wishByLoc() {
+    var c = {};
+    wishItems().forEach(function (it) { c[it.day.loc] = (c[it.day.loc] || 0) + 1; });
+    return c;
+  }
+  function hmMin(s) { var p = (s || '0:0').split(':'); return (+p[0]) * 60 + (+p[1]); }
+  function addDays(iso, n) {
+    var d = new Date(iso + 'T12:00:00Z'); d.setUTCDate(d.getUTCDate() + n);
+    return d.toISOString().slice(0, 10);
+  }
+  function dowOf(iso) { return new Date(iso + 'T12:00:00Z').getUTCDay(); }
+
+  function renderWeek(main) {
+    var locId = state.loc;
+    var shift = state.tz === 'kst' ? (9 - (UTC_OFF[locId] || 9)) * 60 : 0;
+    var dates = locDays(locId).map(function (d) { return d.date; });
+    var blocks = [], untimed = [];
+    wishItems().forEach(function (it) {
+      if (it.day.loc !== locId) return;
+      if (!it.ev.start) { untimed.push(it); return; }
+      var s = hmMin(it.ev.start), e = it.ev.end ? hmMin(it.ev.end) : s + 60;
+      if (it.ev.endNextDay || e <= s) e += 1440;
+      s += shift; e += shift;
+      var off = Math.floor(s / 1440);
+      s -= off * 1440; e -= off * 1440;
+      blocks.push({ it: it, date: addDays(it.day.date, off), s: s, e: Math.min(e, 1440) });
+    });
+    blocks.forEach(function (b) { if (dates.indexOf(b.date) < 0) dates.push(b.date); });
+    dates.sort();
+    // fill gaps so the columns read as consecutive weekdays
+    var cols = [];
+    for (var d = dates[0]; d <= dates[dates.length - 1]; d = addDays(d, 1)) cols.push(d);
+
+    main.appendChild(h('div', { class: 'wk-head' }, [
+      h('h2', null, [t('wk_title')]),
+      h('p', null, [t('wk_desc')]),
+      h('div', { class: 'wk-meta' }, [loc(LOCS[locId].name) + ' · ' + tzAbbr(locId)])
+    ]));
+
+    var lo = 8 * 60, hi = 18 * 60;
+    if (blocks.length) {
+      lo = Math.min.apply(null, blocks.map(function (b) { return b.s; }));
+      hi = Math.max.apply(null, blocks.map(function (b) { return b.e; }));
+      lo = Math.floor(lo / 60) * 60; hi = Math.ceil(hi / 60) * 60;
+      if (hi - lo < 4 * 60) hi = Math.min(1440, lo + 4 * 60);
+    }
+    var PX = 54;   // px per hour
+    var height = (hi - lo) / 60 * PX;
+    var now = nowInLoc(locId), nowMin = state.tz === 'kst' ? null : hmMin(now.hm);
+
+    var grid = h('div', { class: 'wk', style: 'grid-template-columns:44px repeat(' + cols.length + ',minmax(var(--wkmin,118px),1fr))' });
+    grid.appendChild(h('div', { class: 'wk-corner' }, [tzAbbr(locId)]));
+    cols.forEach(function (iso) {
+      var dow = dowOf(iso), conf = locDays(locId).find(function (x) { return x.date === iso; });
+      grid.appendChild(h('div', { class: 'wk-dh' + (dow === 0 ? ' sun' : dow === 6 ? ' sat' : '') + (now.date === iso && !shift ? ' today' : '') }, [
+        h('b', null, [t('wk_dows')[dow]]),
+        h('span', null, [(+iso.slice(5, 7)) + '/' + (+iso.slice(8, 10))]),
+        conf && conf.note ? h('i', null, [loc(conf.note)]) : null
+      ]));
+    });
+    var axis = h('div', { class: 'wk-axis', style: 'height:' + height + 'px' });
+    for (var m = lo; m < hi; m += 60) {
+      axis.appendChild(h('span', { style: 'top:' + ((m - lo) / 60 * PX) + 'px' }, [String(m / 60).padStart(2, '0') + ':00']));
+    }
+    grid.appendChild(axis);
+    cols.forEach(function (iso) {
+      var isConf = locDays(locId).some(function (x) { return x.date === iso; });
+      var col = h('div', { class: 'wk-col' + (!isConf && !shift ? ' off' : ''), style: 'height:' + height + 'px;background-size:100% ' + PX + 'px' });
+      var bs = blocks.filter(function (b) { return b.date === iso; }).sort(function (a, b) { return a.s - b.s || b.e - a.e; });
+      // pack overlapping blocks into lanes, cluster by cluster
+      var cluster = [], clusterEnd = -1;
+      function flush() {
+        var lanes = [];
+        cluster.forEach(function (b) {
+          var k = 0; while (lanes[k] != null && lanes[k] > b.s) k++;
+          lanes[k] = b.e; b.lane = k;
+        });
+        cluster.forEach(function (b) { b.nl = lanes.length; });
+        cluster = []; clusterEnd = -1;
+      }
+      bs.forEach(function (b) {
+        if (cluster.length && b.s >= clusterEnd) flush();
+        cluster.push(b); clusterEnd = Math.max(clusterEnd, b.e);
+      });
+      flush();
+      bs.forEach(function (b) { col.appendChild(renderWeekBlock(b, lo, PX)); });
+      if (nowMin != null && now.date === iso && nowMin >= lo && nowMin <= hi) {
+        col.appendChild(h('div', { class: 'wk-now', style: 'top:' + ((nowMin - lo) / 60 * PX) + 'px' }));
+      }
+      grid.appendChild(col);
+    });
+    main.appendChild(h('div', { class: 'wk-scroll' }, [grid]));
+
+    if (!blocks.length && !untimed.length) {
+      main.appendChild(h('div', { class: 'empty wk-empty' }, [
+        h('div', null, [t('wk_empty')]),
+        h('button', { class: 'now-btn', onclick: function () { setView('schedule'); } }, [t('wk_go')])
+      ]));
+    }
+    if (untimed.length) {
+      main.appendChild(h('div', { class: 'date-heading' }, [t('wk_untimed')]));
+      main.appendChild(h('div', { class: 'tcards' }, untimed.map(function (it) { return renderCard(it.ev, it.day); })));
+    }
+  }
+
+  function renderWeekBlock(b, lo, PX) {
+    var e = b.it.ev, g = TYPE_GROUP[e.type] || 'ops';
+    var top = (b.s - lo) / 60 * PX, ht = Math.max(22, (b.e - b.s) / 60 * PX - 2);
+    var w = 100 / b.nl;
+    var hm = function (m) { return String(Math.floor(m / 60)).padStart(2, '0') + ':' + String(m % 60).padStart(2, '0'); };
+    var papers = b.it.papers;
+    var el = h('button', {
+      class: 'wk-b' + (b.it.viaPaper ? ' via-paper' : '') + (ht < 44 ? ' tiny' : ''),
+      style: '--tc:' + GROUP_COLOR[g] + ';top:' + top + 'px;height:' + ht + 'px;left:calc(' + (b.lane * w) + '% + 2px);width:calc(' + w + '% - 4px)',
+      title: loc(e.title) + '\n' + hm(b.s) + '–' + hm(b.e) + (e.room ? ' · ' + e.room : ''),
+      onclick: function () { openEvent(e, b.it.day); }
+    }, [
+      h('span', { class: 'wk-t' }, [hm(b.s) + (e.room ? ' · ' + e.room : '')]),
+      h('b', null, [loc(e.title)]),
+      papers.length ? h('span', { class: 'wk-p' }, ['⭐ ' + t('wk_papers').replace('{n}', papers.length)]) : null,
+      papers.length ? h('ul', null, papers.slice(0, 6).map(function (p) { return h('li', null, [loc(p)]); })) : null
+    ]);
+    return el;
   }
 
   // ---------------- search ----------------
